@@ -210,7 +210,7 @@ class PersistentQueue(persistencePath: String, val name: String,
   /**
    * Add a value to the end of the queue, transactionally.
    */
-  def add(value: Array[Byte], expiry: Long): Boolean = synchronized {
+  def add(value: Array[Byte], expiry: Option[Time], xid: Option[Int]): Boolean = {
     if (closed || value.size > maxItemSize()) return false
     while (queueLength >= maxItems() || queueSize >= maxSize()) {
       if (!discardOldWhenFull()) return false
@@ -232,7 +232,14 @@ class PersistentQueue(persistencePath: String, val name: String,
         journal.startReadBehind
       }
     }
+    if (xid != None) confirmRemove(xid.get)
     _add(item)
+    if (config.keepJournal) {
+      xid match {
+        case None => journal.add(item)
+        case _    => journal.continue(xid.get, item)
+      }
+    }
     if (keepJournal()) journal.add(item)
     if (waiters.size > 0) {
       waiters.remove(0).actor ! ItemArrived
@@ -241,6 +248,11 @@ class PersistentQueue(persistencePath: String, val name: String,
   }
 
   def add(value: Array[Byte]): Boolean = add(value, 0)
+  def add(value: Array[Byte]): Boolean = add(value, 0, None)
+  def add(value: Array[Byte], expiry: Option[Time]): Boolean = add(value, expiry, None)
+
+  def continue(xid: Int, value: Array[Byte]): Boolean = add(value, 0, Some(xid))
+  def continue(xid: Int, value: Array[Byte], expiry: Option[Time]): Boolean = add(value, expiry, Some(xid))
 
   /**
    * Peek at the head item in the queue, if there is one.
@@ -465,6 +477,9 @@ class PersistentQueue(persistencePath: String, val name: String,
       case JournalItem.SavedXid(xid) => xidCounter = xid
       case JournalItem.Unremove(xid) => _unremove(xid)
       case JournalItem.ConfirmRemove(xid) => openTransactions.removeKey(xid)
+      case JournalItem.Continue(item, xid) =>
+        openTransactions.remove(xid)
+        _add(item)
       case x => log.error("Unexpected item in journal: %s", x)
     }
 

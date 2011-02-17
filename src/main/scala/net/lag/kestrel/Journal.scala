@@ -34,6 +34,7 @@ object JournalItem {
   case class SavedXid(xid: Int) extends JournalItem
   case class Unremove(xid: Int) extends JournalItem
   case class ConfirmRemove(xid: Int) extends JournalItem
+  case class Continue(item: QItem, xid: Int) extends JournalItem
   case object EndOfFile extends JournalItem
 }
 
@@ -65,7 +66,7 @@ class Journal(queuePath: String, syncJournal: => Boolean) {
   private val CMD_UNREMOVE = 5
   private val CMD_CONFIRM_REMOVE = 6
   private val CMD_ADD_XID = 7
-
+  private val CMD_CONTINUE = 8
 
   private def open(file: File): Unit = {
     writer = new FileOutputStream(file, true).getChannel
@@ -123,6 +124,11 @@ class Journal(queuePath: String, syncJournal: => Boolean) {
   }
 
   def add(item: QItem): Unit = add(true, item)
+
+  def continue(xid: Int, item: QItem): Unit = {
+    item.xid = xid
+    size += writeLarge(true, item.pack(CMD_CONTINUE.toByte, true))
+  }
 
   // used only to list pending transactions when recreating the journal.
   private def addWithXid(item: QItem) = {
@@ -267,6 +273,11 @@ class Journal(queuePath: String, syncJournal: => Boolean) {
             val item = QItem.unpack(data)
             item.xid = xid
             (JournalItem.Add(item), 9 + data.length)
+          case CMD_CONTINUE =>
+            val xid = readInt(in)
+            val data = readBlock(in)
+            val item = QItem.unpack(data)
+            (JournalItem.Continue(item, xid), 9 + data.length)
           case n =>
             throw new BrokenItemException(lastPosition, new IOException("invalid opcode in journal: " + n.toInt + " at position " + (in.position - 1)))
         }
@@ -332,16 +343,35 @@ class Journal(queuePath: String, syncJournal: => Boolean) {
   }
 
   private def write(allowSync: Boolean, items: Any*): Int = {
-    byteBuffer.clear
+    writeWithBuffer(allowSync, byteBuffer, items: _*)
+  }
+
+  private def writeLarge(allowSync: Boolean, items: Any*): Int = {
+    val size = items.foldLeft(0)((size: Int, item: Any) => {
+      size + (item match {
+        case bb: ByteBuffer => bb.limit
+        case b: Byte => 1
+        case i: Int => 4
+      })
+    })
+    val largeBuffer = new Array[Byte](size)
+    val largeByteBuffer = ByteBuffer.wrap(largeBuffer)
+    largeByteBuffer.order(ByteOrder.LITTLE_ENDIAN)
+    writeWithBuffer(allowSync, largeByteBuffer, items: _*)
+  }
+
+  private def writeWithBuffer(allowSync: Boolean, buf: ByteBuffer, items: Any*): Int = {
+    buf.clear
     for (item <- items) item match {
-      case b: Byte => byteBuffer.put(b)
-      case i: Int => byteBuffer.putInt(i)
+      case bb: ByteBuffer => buf.put(bb)
+      case b: Byte => buf.put(b)
+      case i: Int => buf.putInt(i)
     }
-    byteBuffer.flip
-    while (byteBuffer.position < byteBuffer.limit) {
-      writer.write(byteBuffer)
+    buf.flip
+    while (buf.position < buf.limit) {
+      writer.write(buf)
     }
     if (allowSync && syncJournal) writer.force(false)
-    byteBuffer.limit
+    buf.limit
   }
 }
