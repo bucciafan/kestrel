@@ -210,49 +210,49 @@ class PersistentQueue(persistencePath: String, val name: String,
   /**
    * Add a value to the end of the queue, transactionally.
    */
-  def add(value: Array[Byte], expiry: Option[Time], xid: Option[Int]): Boolean = {
-    if (closed || value.size > maxItemSize()) return false
-    while (queueLength >= maxItems() || queueSize >= maxSize()) {
-      if (!discardOldWhenFull()) return false
-      _remove(false)
-      _totalDiscarded += 1
-      if (keepJournal()) journal.remove()
-    }
+  def add(value: Array[Byte], expiry: Long, xid: Option[Int]): Boolean = {
+    synchronized {
+      if (closed || value.size > maxItemSize()) return false
+      while (queueLength >= maxItems() || queueSize >= maxSize()) {
+        if (!discardOldWhenFull()) return false
+        _remove(false)
+        _totalDiscarded += 1
+        if (keepJournal()) journal.remove()
+      }
 
-    val now = Time.now.inMilliseconds
-    val item = QItem(now, adjustExpiry(now, expiry), value, 0)
-    if (keepJournal() && !journal.inReadBehind) {
-      if (journal.size > maxJournalSize() * maxJournalOverflow() && queueSize < maxJournalSize()) {
-        // force re-creation of the journal.
-        log.info("Rolling journal file for '%s' (qsize=%d)", name, queueSize)
-        journal.roll(xidCounter, openTransactionIds map { openTransactions(_) }, queue)
+      val now = Time.now.inMilliseconds
+      val item = QItem(now, adjustExpiry(now, expiry), value, 0)
+      if (keepJournal() && !journal.inReadBehind) {
+        if (journal.size > maxJournalSize() * maxJournalOverflow() && queueSize < maxJournalSize()) {
+          // force re-creation of the journal.
+          log.info("Rolling journal file for '%s' (qsize=%d)", name, queueSize)
+          journal.roll(xidCounter, openTransactionIds map { openTransactions(_) }, queue)
+        }
+        if (queueSize >= maxMemorySize()) {
+          log.info("Dropping to read-behind for queue '%s' (%d bytes)", name, queueSize)
+          journal.startReadBehind
+        }
       }
-      if (queueSize >= maxMemorySize()) {
-        log.info("Dropping to read-behind for queue '%s' (%d bytes)", name, queueSize)
-        journal.startReadBehind
+      if (xid != None) openTransactions.removeKey(xid.get)
+      _add(item)
+      if (keepJournal()) {
+        xid match {
+          case None => journal.add(item)
+          case _    => journal.continue(xid.get, item)
+        }
       }
-    }
-    if (xid != None) confirmRemove(xid.get)
-    _add(item)
-    if (config.keepJournal) {
-      xid match {
-        case None => journal.add(item)
-        case _    => journal.continue(xid.get, item)
+      if (waiters.size > 0) {
+        waiters.remove(0).actor ! ItemArrived
       }
-    }
-    if (keepJournal()) journal.add(item)
-    if (waiters.size > 0) {
-      waiters.remove(0).actor ! ItemArrived
     }
     true
   }
 
-  def add(value: Array[Byte]): Boolean = add(value, 0)
-  def add(value: Array[Byte]): Boolean = add(value, 0, None)
-  def add(value: Array[Byte], expiry: Option[Time]): Boolean = add(value, expiry, None)
+  def add(value: Array[Byte]): Boolean = add(value, 0L, None)
+  def add(value: Array[Byte], expiry: Long): Boolean = add(value, expiry, None)
 
-  def continue(xid: Int, value: Array[Byte]): Boolean = add(value, 0, Some(xid))
-  def continue(xid: Int, value: Array[Byte], expiry: Option[Time]): Boolean = add(value, expiry, Some(xid))
+  def continue(xid: Int, value: Array[Byte]): Boolean = add(value, 0L, Some(xid))
+  def continue(xid: Int, value: Array[Byte], expiry: Long): Boolean = add(value, expiry, Some(xid))
 
   /**
    * Peek at the head item in the queue, if there is one.
@@ -478,7 +478,7 @@ class PersistentQueue(persistencePath: String, val name: String,
       case JournalItem.Unremove(xid) => _unremove(xid)
       case JournalItem.ConfirmRemove(xid) => openTransactions.removeKey(xid)
       case JournalItem.Continue(item, xid) =>
-        openTransactions.remove(xid)
+        openTransactions.removeKey(xid)
         _add(item)
       case x => log.error("Unexpected item in journal: %s", x)
     }

@@ -509,7 +509,7 @@ class PersistentQueueSpec extends Specification with TestHelper {
 
     "continue a queue item" in {
       withTempFolder {
-        val q = new PersistentQueue("things", folderName, new QueueBuilder().apply(), timer)
+        val q = new PersistentQueue(folderName, "things", Config.fromMap(Map.empty))
         q.setup
         q.add("one".getBytes)
 
@@ -519,7 +519,7 @@ class PersistentQueueSpec extends Specification with TestHelper {
         q.continue(item1.get.xid, "two".getBytes)
         q.close
 
-        val q2 = new PersistentQueue("things", folderName, new QueueBuilder().apply(), timer)
+        val q2 = new PersistentQueue(folderName, "things", Config.fromMap(Map.empty))
         q2.setup
         q2.length mustEqual 1
         q2.openTransactionCount mustEqual 0
